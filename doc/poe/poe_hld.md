@@ -33,6 +33,7 @@
  |:---:|:----:|:--------------:|--------------------|
  | 0.1 | 03-26-2024 | Volodymyr Mytnyk |  Initial version |
  | 0.2 | 04-01-2024 | Volodymyr Mytnyk |  Add SWSS cahnges, include LLDP interaction, add example PoE config, mention about warm reboot requirements |
+ | 0.3 | 10-06-2024 | Serhiy Boiko |  Update poe configuration json, SAI attributes, appl_db and conf_db tables, and CLI output; add yang models |
 
 ### Scope  
 
@@ -104,38 +105,54 @@ PoE manager consists of a daemon that implements the following functionality:
   - PoE protocol and class;
   - PoE power, current and voltage;
   - PSE information;
-- apply PoE controller configuration;
-- track changes in config, appl DB;
+- Apply PoE controller configuration;
+- Track changes in config, appl DB;
 
 ##### Configuration
 
 Below is a example of PoE configuration used by PoE manager on start up. The mapping between PoE port and ASIC port is done via front panel id.
-```
-{
-  "hw_info": "integrated_mcu",
-  "pse_list": [
-    {
-      "pse_index": 0
-    },
-    {
-      "pse_index": 1
-    },
-    ...
-  ],
-  "port_mapping_list": [
-    {
-      "Ethernet0": 
+```json
+[
+  {
+    "hw_info": "mcu1",
+    "power_limit_mode": "port",
+    "pse_list": [
       {
-          "front_panel_index": 1
+        "pse_index": 0
       },
-      ...
-      "Ethernet47": 
       {
-          "front_panel_index": 48
+        "pse_index": 1
       }
-    }
-  ]
-}
+    ],
+    "port_mapping_list": [
+      {
+        "interface": "Ethernet0",
+        "front_panel_index": 1,
+        "power_priority": "crit"
+      },
+      {
+        "interface": "Ethernet1",
+        "front_panel_index": 2,
+        "power_priority": "high"
+      }
+    ]
+  },
+  {
+    "hw_info": "mcu2",
+    "pse_list": [
+      {
+        "pse_index": 2
+      }
+    ],
+    "port_mapping_list": [
+      {
+        "interface": "Ethernet2",
+        "front_panel_index": 3,
+        "power_priority": "low"
+      }
+    ]
+  }
+]
 ```
 
 #### LLDP manager (modified)
@@ -154,8 +171,8 @@ This section covers the high level design of the built-in SONiC PoE feature.
 This section covers the following points in detail.
 
 	- Existing moduels are not modified by this design.
-	- Repositories that will be changed: sonic-buildimage, ...
-	- Module/sub-module interfaces and dependencies. 
+	- Repositories that will be changed: sonic-buildimage, sonic-swss, sonic-swss-common, sonic-sairedis, sonic-utilities.
+	- Module/sub-module interfaces and dependencies.
 	- SWSS and Syncd are not changed.
 	- This design doesn't change existing DB Schema, only new are added.
 	- Linux dependencies and interface
@@ -175,9 +192,9 @@ This section covers the following points in detail.
 
 "Show" flow:
   1. Get PoE controller information;
-  2. Update application DB with the PoE status;
+  2. Update state DB with the PoE status;
   3. Repeat step 1-2 each seconds (optional);
-  4. SONiC CLI read and display PoE infomation from application DB;
+  4. SONiC CLI read and display PoE infomation from state DB;
 
 ![sequence_show_command](images/poe_show_flow.png)
 
@@ -208,7 +225,7 @@ The PoE Manager uses a new SAI PoE library that implements the PoE Abstraction I
 | ----------------- | ------------------------------------- |
 | Hardware Info     | SAI_POE_DEVICE_ATTR_HARDWARE_INFO     |
 | PSE List          | SAI_POE_DEVICE_ATTR_POE_PSE_LIST      |
-| PoE List          | SAI_POE_DEVICE_ATTR_POE_PORT_LIST     |
+| List of ports     | SAI_POE_DEVICE_ATTR_POE_PORT_LIST     |
 | Total Power       | SAI_POE_DEVICE_ATTR_TOTAL_POWER       |
 | Power Consumption | SAI_POE_DEVICE_ATTR_POWER_CONSUMPTION |
 | Version           | SAI_POE_DEVICE_ATTR_VERSION           |
@@ -227,16 +244,15 @@ The PoE Manager uses a new SAI PoE library that implements the PoE Abstraction I
 
 #### Port Capabilities
 
-| Capabilities       | SAI attributes                        |
-| ------------------ | ------------------------------------- |
-| Front Panel ID     | SAI_POE_PORT_ATTR_FRONT_PANEL_ID      |
-| Standard           | SAI_POE_PORT_ATTR_STANDARD            |
-| Admin Enable State | SAI_POE_PORT_ATTR_ADMIN_ENABLED_STATE |
-| Power Limit        | SAI_POE_PORT_ATTR_POWER_LIMIT         |
-| Power Priority     | SAI_POE_PORT_ATTR_POWER_PRIORITY      |
-| Power Consumption  | SAI_POE_PORT_ATTR_CONSUMPTION         |
-| Status             | SAI_POE_PORT_ATTR_STATUS              |
-| Detailed Status    | SAI_POE_PORT_ATTR_DETAILED_STATUS     |
+| Capabilities            | SAI attributes                        |
+| ----------------------- | ------------------------------------- |
+| Front Panel ID          | SAI_POE_PORT_ATTR_FRONT_PANEL_ID      |
+| Standard                | SAI_POE_PORT_ATTR_STANDARD            |
+| Admin Enable State      | SAI_POE_PORT_ATTR_ADMIN_ENABLED_STATE |
+| Power Limit             | SAI_POE_PORT_ATTR_POWER_LIMIT         |
+| Power Priority          | SAI_POE_PORT_ATTR_POWER_PRIORITY      |
+| Voltage, current, etc.  | SAI_POE_PORT_ATTR_CONSUMPTION         |
+| Status                  | SAI_POE_PORT_ATTR_STATUS              |
 
 
 ### Configuration and management 
@@ -248,98 +264,199 @@ Feature is not an Application Extension
 
 ##### Show commands
 - show poe status
-
 ```
-PoE system information
-================================
-Status            : ready
-Total PoE Ports   : 48
-
-Total Power       : 714.500 W
-Power Consumption : 12.500 W
-Power Available   : 702.000 W
-
- ```
-
-- show poe interface \<ifname\>
+  Id    PoE ports  Total power    Power consump    Power available    Power limit mode    HW info    Version
+----  -----------  -------------  ---------------  -----------------  ------------------  ---------  ---------
+   0            2  100.000 W      10.000 W         90.000 W           port                mcu1       0.1.2.3
+   1            1  100.000 W      10.000 W         90.000 W           class               mcu2       0.1.2.3
 ```
 
-Port         Status      En/Dis  Priority Protocol      Class  PWR Consump  PWR Limit   Voltage   Current
------------- ----------- ------- -------- ------------- ----- ------------ ---------- --------- ---------
-Ethernet0    delivering  enable  high     802.3BT/High      4      6.100 W   80.600 W  54.000 V   0.113 A
-Ethernet1    delivering  enable  crit     802.3BT/High      4      6.500 W   80.600 W  54.000 V   0.120 A
-Ethernet2    searching   enable  low      802.3BT/High      0      0.000 W   80.600 W   0.000 V   0.000 A
-Ethernet3    searching   enable  crit     802.3BT/High      0      0.000 W   80.600 W   0.000 V   0.000 A
+
+- show poe pse status
 ```
+  Id  Status    Temperature    SW ver            HW ver
+----  --------  -------------  ----------------  ----------------
+   0  active    25.000 C       0.1.2.3           4.5.6.7
+   1  active    25.000 C       0.1.2.3           4.5.6.7
+   2  active    25.000 C       0.1.2.3           4.5.6.7
+```
+
+
+- show poe interface status \[ifname\]
+```
+Port         Status      En/Dis    Priority    Protocol          Class A    Class B  PWR Consump    PWR limit    Voltage    Current
+-----------  ----------  --------  ----------  --------------  ---------  ---------  -------------  -----------  ---------  ---------
+Ethernet0    delivering  enable    crit        802.3bt Type 3          2          4  10.000 W       50.000 W     50.000 V   0.200 A
+Ethernet1    delivering  enable    high        802.3bt Type 3          2          4  10.000 W       50.000 W     50.000 V   0.200 A
+Ethernet2    delivering  enable    low         802.3bt Type 3          2          4  10.000 W       50.000 W     50.000 V   0.200 A
+```
+
+
+- show poe interface configuration \[ifname\]
+```
+Port         En/Dis      Power limit  Priority
+-----------  --------  -------------  ----------
+Ethernet0    enable               50  crit
+Ethernet1    enable               50  high
+Ethernet2    enable               50  low
+```
+
 
 ##### Config commands
 
 - config poe interface status \<ifname\> {enable | disable}
 - config poe interface priority \<ifname\> {crit | high | low}
-- config poe interface power_limit \<ifname\> {power_limit}
+- config poe interface power-limit \<ifname\> {power_limit}
 
 Examples:
 ```
 $ config poe interface status Ethernet0 enable
 $ config poe interface priority Ethernet0 high
-$ config poe interface power_limit Ethernet0 20.4
+$ config poe interface power-limit Ethernet0 20.4
 ```
 
 **TODO**: update CLI reference https://github.com/sonic-net/sonic-utilities/blob/master/doc/Command-Reference.md
 
 #### YANG model Enhancements
 
-TBD
+```yang
+//filename: sonic-poe.yang
+module sonic-poe {
+    yang-version 1.1;
+    namespace "http://github.com/sonic-net/sonic-poe";
+    prefix poe;
 
-#### Config DB Enhancements  
+    import sonic-types {
+        prefix stypes;
+    }
+
+    import sonic-port {
+        prefix port;
+    }
+
+    organization
+        "SONiC";
+
+    contact
+        "SONiC";
+
+    description
+        "PoE YANG Module for SONiC OS";
+
+    revision 2024-06-13 {
+        description
+            "First Revision";
+    }
+
+    container sonic-poe {
+
+        container POE_PORT {
+
+            description "Power over Ethernet configuration (POE_PORT table in config_db.json)";
+
+            typedef poe-priority {
+
+                type enumeration {
+                    enum crit;
+                    enum high;
+                    enum low;
+                }
+            }
+
+            list POE_PORT_LIST {
+                key "ifname";
+                leaf ifname {
+                    type leafref {
+                        path /port:sonic-port/port:PORT/port:PORT_LIST/port:name;
+                    }
+                    description "Interface name from the PORT table in config_db.json";
+                }
+                leaf enabled {
+                    type stypes:mode-status;
+                    default disable;
+                    description "PoE status on port. [enable/disable]";
+                }
+                leaf pwr_limit {
+                    mandatory true;
+                    type string {
+                        length 1..255;
+                    }
+                    description "Power limit on PoE port. [0..999]";
+                }
+                leaf priority {
+                    type poe-priority;
+                    default high;
+                    description "Port priority level. [crit/high/low]";
+                }
+            }
+            /* end of POE_PORT_LIST */
+        }
+        /* end of container POE_PORT */
+    }
+    /* end of top-level container sonic-poe */
+}
+/* end of module sonic-poe */
+```
+
+#### Config DB Enhancements
 
 New table has been added to the config database to store related PoE configuration parameters:
 
-##### POE_PORT_TABLE
+##### POE_PORT
 ~~~
-    ;Stores PoE port configuration
+    ; Stores PoE port configuration
     key         = POE_PORT|ifname         ; ifname with prefix POE_PORT
     ; field     = value
     enabled     = "enable" / "disable"    ; enable/disable PoE on port, default "disable"
-    power_limit = 1*3.1DIGIT              ; power limit on PoE port
+    pwr_limit   = 1*3.1DIGIT              ; power limit on PoE port
     priority    = "crit" / "high" / "low" ; port priority level, default "high"
 ~~~
 
-#### Application DB Enhancements  
+#### State DB Enhancements
 
-In SONiC all the peripheral devices data (information relared to PoE) will be stored in application database in separated tables:
+In SONiC all the peripheral devices data (information relared to PoE) will be stored in state database in separated tables:
 
-#### POE_PSE_STATE_TABLE
+#### POE_DEVICE_TABLE
+~~~
+    ; Defines information for a PoE device
+    key            = POE_DEVICE_TABLE|id  ; key
+    ; field        = value
+    total_ports    = 1*2DIGIT             ; total PoE ports
+    total_pwr      = 1*4.3DIGIT           ; total power
+    pwr_consump    = 1*4.3DIGIT           ; total power consumption
+    pwr_limit_mode = STRING               ; power limit mode
+    hw_info        = STRING               ; hardware info
+    version        = STRING               ; hardware version
+~~~
+
+#### POE_PSE_TABLE
 ~~~
     ; Defines information for a global PoE state
-    key         = POE_TABLE:GLOBAL   ; key
+    key         = POE_PSE_TABLE|id                  ; key
     ; field     = value
-    platform_supported = BOOLEAN                             ; PoE platform support
-    poe_status         = "N/A" / "init" / "failed" / "ready" ; PoE status
-    total_ports        = 1*2DIGIT                            ; total PoE ports
-    total_pwr          = 1*4.3DIGIT                          ; total power
-    pwr_consump        = 1*4.3DIGIT                          ; total power consumption
-    pwr_avail          = 1*4.3DIGIT                          ; available power
-    pse_sw_ver         = STRING                              ; PSE software version
-    pse_hw_ver         = STRING                              ; PSE hardware version
-    pse_temp           = 1*3DIGIT                            ; PSE temperature
-    pse_status         = "active" / "fail" / "not present"   ; PSE status
+    sw_ver      = STRING                            ; PSE software version
+    hw_ver      = STRING                            ; PSE hardware version
+    temperature = 1*3DIGIT                          ; PSE temperature
+    status      = "active" / "fail" / "not present" ; PSE status
 ~~~
 
-#### POE_PORT_STATE_TABLE
+#### POE_PORT_TABLE
+~~~
     ; Defines information for a PoE port state
-    key         = POE_PORT_STATE|ifname   ; ifname with prefix POE_PORT_STATE
+    key         = POE_PORT_TABLE|ifname   ; ifname with prefix POE_PORT_TABLE
     ; field     = value
-    fp_port     = 1*2DIGIT                ; PoE front panel port (map PoE port num to ifname)
-    status      = BOOLEAN                 ; presence state of the PoE
+    fp_port     = 1*2DIGIT                                    ; PoE front panel port (map PoE port num to ifname)
+    status      = "off" / "searching" / "delivering" / "fail" ; interface status
     enabled     = "enable" / "disable"    ; PoE enabled on port
     priority    = "crit" / "high" / "low" ; port priority level
     protocol    = STRING                  ; name of PoE protocol
-    class       = 1*DIGIT                 ; power class
-    pwr_consump = 1*3.3DIGIT              ; the power of the PoE
+    class_a     = 1*DIGIT                 ; power class for channel a
+    class_b     = 1*DIGIT                 ; power class for channel b
+    pwr_consump = 1*3.3DIGIT              ; current power draw of the port
     pwr_limit   = 1*3.3DIGIT              ; power capacity of the PoE port
     voltage     = 1*3.3DIGIT              ; output voltage of the PoE port
     current     = 1*3.3DIGIT              ; the current of the PoE port
+~~~
 
 
 ### Warmboot and Fastboot Design Impact  
